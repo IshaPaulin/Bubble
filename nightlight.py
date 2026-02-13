@@ -170,18 +170,17 @@ class NightLightWindow(QWidget):
             
             if strength == 0:
                 # Reset to normal (neutral color)
-                gamma_array = (ctypes.c_ushort * 256)()
+                gamma_ramp = (ctypes.c_ushort * 768)()
                 for i in range(256):
-                    gamma_array[i] = i * 256
+                    gamma_ramp[i] = i * 256          # Red
+                    gamma_ramp[i + 256] = i * 256    # Green
+                    gamma_ramp[i + 512] = i * 256    # Blue
                 
-                ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, 
-                    ctypes.byref(gamma_array * 3))
+                ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, ctypes.byref(gamma_ramp))
             else:
                 # Calculate color shift based on strength
                 # Reduce blue channel, keep red/green higher
-                red_gamma = (ctypes.c_ushort * 256)()
-                green_gamma = (ctypes.c_ushort * 256)()
-                blue_gamma = (ctypes.c_ushort * 256)()
+                gamma_ramp = (ctypes.c_ushort * 768)()
                 
                 # Strength affects how much blue light we reduce
                 blue_reduction = strength / 100.0
@@ -189,26 +188,18 @@ class NightLightWindow(QWidget):
                 for i in range(256):
                     # Red channel - slightly boosted
                     red_value = min(65535, int(i * 256 * (1.0 + blue_reduction * 0.1)))
-                    red_gamma[i] = red_value
+                    gamma_ramp[i] = red_value
                     
                     # Green channel - slightly reduced
                     green_value = int(i * 256 * (1.0 - blue_reduction * 0.2))
-                    green_gamma[i] = green_value
+                    gamma_ramp[i + 256] = green_value
                     
                     # Blue channel - heavily reduced for warmth
                     blue_value = int(i * 256 * (1.0 - blue_reduction * 0.6))
-                    blue_gamma[i] = blue_value
-                
-                # Combine into one array (RGB)
-                gamma_ramp = (ctypes.c_ushort * 768)()
-                for i in range(256):
-                    gamma_ramp[i] = red_gamma[i]
-                    gamma_ramp[i + 256] = green_gamma[i]
-                    gamma_ramp[i + 512] = blue_gamma[i]
+                    gamma_ramp[i + 512] = blue_value
                 
                 # Apply gamma ramp
-                result = ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, 
-                    ctypes.byref(gamma_ramp))
+                result = ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, ctypes.byref(gamma_ramp))
                 
                 if result:
                     print(f"✓ Night Light strength set to: {strength}%")
