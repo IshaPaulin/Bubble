@@ -1,16 +1,8 @@
 # handnav.py
 import cv2
-try:
-    from mediapipe.tasks import python
-    from mediapipe.tasks.python import vision
-    NEW_API = True
-except ImportError:
-    import mediapipe as mp
-    NEW_API = False
-
 import pyautogui
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                               QLabel, QComboBox)
+                               QLabel, QComboBox, QCheckBox)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 import numpy as np
@@ -20,12 +12,14 @@ class HandNavigationWindow(QWidget):
         super().__init__()
         self.tracking = False
         self.cap = None
-        self.hand_detector = None
         
         # Scroll settings
         self.scroll_sensitivity = 20
         self.prev_y = None
         self.scroll_threshold = 0.02
+        
+        # Detection zone (only detect in bottom half of frame)
+        self.detection_zone = "bottom"  # "bottom", "left", "right", "full"
         
         self.initUI()
         
@@ -33,14 +27,26 @@ class HandNavigationWindow(QWidget):
         self.setWindowTitle("Hand Navigation")
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         
+        # Make window semi-transparent
+        self.setWindowOpacity(0.95)
+        
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
-        # Title
+        # Title with minimize button
+        title_layout = QHBoxLayout()
         title = QLabel("👋 Hand Navigation")
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        layout.addWidget(title)
+        title_layout.addWidget(title)
+        
+        # Minimize window button
+        btn_minimize = QPushButton("🔽 Minimize")
+        btn_minimize.clicked.connect(self.minimize_window)
+        btn_minimize.setStyleSheet("padding: 5px; font-size: 12px; max-width: 100px;")
+        title_layout.addWidget(btn_minimize)
+        
+        layout.addLayout(title_layout)
         
         # Camera preview
         self.camera_label = QLabel("Camera Preview")
@@ -58,17 +64,18 @@ class HandNavigationWindow(QWidget):
         self.status_label.setStyleSheet("font-size: 13px; padding: 8px; background-color: #3d3d3d; border-radius: 5px;")
         layout.addWidget(self.status_label)
         
-        # Gesture mode selection
-        mode_layout = QHBoxLayout()
-        mode_label = QLabel("Gesture Mode:")
-        mode_label.setStyleSheet("font-size: 14px;")
-        mode_layout.addWidget(mode_label)
+        # Detection zone
+        zone_layout = QHBoxLayout()
+        zone_label = QLabel("Detection Zone:")
+        zone_label.setStyleSheet("font-size: 14px;")
+        zone_layout.addWidget(zone_label)
         
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Scroll", "Mouse Move (coming soon)"])
-        mode_layout.addWidget(self.mode_combo)
-        mode_layout.addStretch()
-        layout.addLayout(mode_layout)
+        self.zone_combo = QComboBox()
+        self.zone_combo.addItems(["Bottom Half (recommended)", "Left Side", "Right Side", "Full Frame"])
+        self.zone_combo.currentTextChanged.connect(self.on_zone_changed)
+        zone_layout.addWidget(self.zone_combo)
+        zone_layout.addStretch()
+        layout.addLayout(zone_layout)
         
         # Sensitivity control
         sensitivity_layout = QHBoxLayout()
@@ -87,10 +94,11 @@ class HandNavigationWindow(QWidget):
         # Instructions
         instructions = QLabel(
             "📌 Instructions:\n"
-            "• Show your open palm to the camera\n"
+            "• Position your hand in the detection zone (green box)\n"
+            "• Keep face and background out of detection zone\n"
             "• Move hand UP to scroll UP\n"
             "• Move hand DOWN to scroll DOWN\n"
-            "• Keep hand steady when not scrolling"
+            "• Minimize window while tracking to see better"
         )
         instructions.setStyleSheet("""
             font-size: 12px; 
@@ -153,6 +161,22 @@ class HandNavigationWindow(QWidget):
         """)
         
         self.setMinimumSize(500, 700)
+    
+    def minimize_window(self):
+        """Minimize to a small corner window"""
+        self.showMinimized()
+    
+    def on_zone_changed(self, value):
+        """Update detection zone"""
+        if "Bottom" in value:
+            self.detection_zone = "bottom"
+        elif "Left" in value:
+            self.detection_zone = "left"
+        elif "Right" in value:
+            self.detection_zone = "right"
+        else:
+            self.detection_zone = "full"
+        print(f"Detection zone: {self.detection_zone}")
         
     def on_sensitivity_changed(self, value):
         if value == "Low":
@@ -185,7 +209,7 @@ class HandNavigationWindow(QWidget):
             self.timer.timeout.connect(self.update_frame)
             self.timer.start(30)
             
-            print("Hand tracking started (using simple color detection)")
+            print("Hand tracking started")
             
         except Exception as e:
             print(f"Error starting tracking: {e}")
@@ -209,6 +233,30 @@ class HandNavigationWindow(QWidget):
         
         print("Hand tracking stopped")
     
+    def get_detection_mask(self, frame_shape):
+        """Create mask for detection zone"""
+        h, w = frame_shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        if self.detection_zone == "bottom":
+            # Bottom half only
+            mask[h//2:, :] = 255
+            zone_rect = (0, h//2, w, h)
+        elif self.detection_zone == "left":
+            # Left third
+            mask[:, :w//3] = 255
+            zone_rect = (0, 0, w//3, h)
+        elif self.detection_zone == "right":
+            # Right third
+            mask[:, 2*w//3:] = 255
+            zone_rect = (2*w//3, 0, w, h)
+        else:
+            # Full frame
+            mask[:, :] = 255
+            zone_rect = (0, 0, w, h)
+        
+        return mask, zone_rect
+    
     def update_frame(self):
         if not self.tracking or not self.cap:
             return
@@ -220,8 +268,17 @@ class HandNavigationWindow(QWidget):
         # Flip frame
         frame = cv2.flip(frame, 1)
         
-        # Simple hand detection using skin color
-        hand_center = self.detect_hand_simple(frame)
+        # Get detection zone
+        zone_mask, zone_rect = self.get_detection_mask(frame.shape)
+        
+        # Draw detection zone
+        cv2.rectangle(frame, (zone_rect[0], zone_rect[1]), 
+                     (zone_rect[2], zone_rect[3]), (0, 255, 0), 2)
+        cv2.putText(frame, "Detection Zone", (zone_rect[0] + 10, zone_rect[1] + 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Detect hand in zone
+        hand_center = self.detect_hand_in_zone(frame, zone_mask)
         
         if hand_center:
             # Draw circle at hand center
@@ -230,40 +287,59 @@ class HandNavigationWindow(QWidget):
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             # Process scroll
-            hand_y = hand_center[1] / frame.shape[0]  # Normalize to 0-1
+            hand_y = hand_center[1] / frame.shape[0]
             self.process_scroll(hand_y)
         else:
             self.prev_y = None
-            cv2.putText(frame, "No hand detected", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(frame, "Show hand in green zone", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
         self.display_frame(frame)
     
-    def detect_hand_simple(self, frame):
-        """Simple hand detection using skin color in HSV"""
+    def detect_hand_in_zone(self, frame, zone_mask):
+        """Detect hand only in specified zone"""
         # Convert to HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Skin color range in HSV
-        lower_skin = np.array([0, 20, 70], dtype=np.uint8)
-        upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+        # Skin color range (tuned to avoid brown backgrounds)
+        lower_skin = np.array([0, 30, 60], dtype=np.uint8)
+        upper_skin = np.array([20, 150, 255], dtype=np.uint8)
         
-        # Create mask
-        mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        # Create skin mask
+        skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
         
-        # Blur to reduce noise
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        # Apply zone mask
+        skin_mask = cv2.bitwise_and(skin_mask, skin_mask, mask=zone_mask)
+        
+        # Morphological operations to reduce noise
+        kernel = np.ones((5, 5), np.uint8)
+        skin_mask = cv2.erode(skin_mask, kernel, iterations=1)
+        skin_mask = cv2.dilate(skin_mask, kernel, iterations=2)
+        skin_mask = cv2.GaussianBlur(skin_mask, (5, 5), 0)
         
         # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if contours:
-            # Get largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
+            # Filter contours by area and shape
+            valid_contours = []
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                # Hand should be reasonably large but not too large (face)
+                if 8000 < area < 50000:
+                    # Check if contour is somewhat vertical (hand-like)
+                    x, y, w, h = cv2.boundingRect(contour)
+                    aspect_ratio = h / w if w > 0 else 0
+                    
+                    # Hand is usually taller than wide
+                    if 0.8 < aspect_ratio < 3.0:
+                        valid_contours.append(contour)
             
-            # Only process if contour is large enough
-            if cv2.contourArea(largest_contour) > 5000:
-                # Get center of mass
+            if valid_contours:
+                # Get largest valid contour
+                largest_contour = max(valid_contours, key=cv2.contourArea)
+                
+                # Get center
                 M = cv2.moments(largest_contour)
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"])
@@ -284,7 +360,7 @@ class HandNavigationWindow(QWidget):
             
             if scroll_amount != 0:
                 pyautogui.scroll(scroll_amount)
-                print(f"Scrolling: {scroll_amount}")
+                # print(f"Scrolling: {scroll_amount}")  # Commented to reduce spam
         
         self.prev_y = current_y
     
